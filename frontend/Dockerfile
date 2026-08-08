@@ -6,10 +6,13 @@ ENV PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir streamlit requests
+COPY pyproject.toml uv.lock ./
 
-COPY frontend/ ./frontend/
+RUN pip install --no-cache-dir uv \
+    && uv sync --frozen --no-dev
 
-EXPOSE 8501
+COPY . .
 
-CMD ["sh", "-c", "streamlit run frontend/streamlit_app.py --server.address=0.0.0.0 --server.port=${PORT:-8501} --server.headless=true"]
+EXPOSE 10000
+
+CMD ["sh", "-c", "uv run uvicorn app:app --host 127.0.0.1 --port 8000 & exec streamlit run frontend/streamlit_app.py --server.address=0.0.0.0 --server.port=${PORT:-10000} --server.headless=true"]
