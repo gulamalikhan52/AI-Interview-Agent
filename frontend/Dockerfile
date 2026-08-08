@@ -15,4 +15,4 @@ COPY . .
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uv run uvicorn app:app --host 127.0.0.1 --port 8000 & exec streamlit run frontend/streamlit_app.py --server.address=0.0.0.0 --server.port=${PORT:-10000} --server.headless=true"]
+CMD ["sh", "-c", "uv run uvicorn app:app --host 127.0.0.1 --port 8000 & exec uv run streamlit frontend/streamlit_app.py --server.address=0.0.0.0 --server.port=${PORT:-10000} --server.headless=true"]
