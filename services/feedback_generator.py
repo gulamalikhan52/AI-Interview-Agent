@@ -21,6 +21,7 @@ def load_feedback_prompt() -> str:
     """
 
     if not PROMPT_FILE.exists():
+
         raise FileNotFoundError(
             f"Feedback prompt not found: {PROMPT_FILE}"
         )
@@ -31,117 +32,276 @@ def load_feedback_prompt() -> str:
 
 
 # ==========================================================
-# GENERATE FEEDBACK
+# CLEAN JSON RESPONSE
 # ==========================================================
 
-def generate_feedback(history: list) -> dict:
-    """
-    Generate structured final feedback from the
-    complete interview history.
-    """
+def clean_json_response(
+    content: str,
+) -> str:
 
-    prompt_template = load_feedback_prompt()
+    content = content.strip()
 
-    history_text = json.dumps(
-        history,
-        indent=2,
-        ensure_ascii=False,
-    )
+    # Remove accidental Markdown code fences.
 
-    prompt = prompt_template.format(
-        interview_history=history_text,
-    )
+    if content.startswith("```"):
 
-    response = llm.invoke(prompt)
+        content = (
+            content
+            .replace(
+                "```json",
+                ""
+            )
+            .replace(
+                "```JSON",
+                ""
+            )
+            .replace(
+                "```",
+                ""
+            )
+            .strip()
+        )
 
-    text = response.content.strip()
+    return content
 
-    # ------------------------------------------------------
-    # Remove accidental markdown code fences
-    # ------------------------------------------------------
 
-    if text.startswith("```"):
-        text = text.replace(
-            "```json",
-            "",
-        ).replace(
-            "```",
-            "",
-        ).strip()
+# ==========================================================
+# VALIDATE FEEDBACK
+# ==========================================================
 
-    # ------------------------------------------------------
-    # Parse JSON
-    # ------------------------------------------------------
-
-    try:
-
-        feedback = json.loads(text)
-
-    except json.JSONDecodeError:
-
-        feedback = {
-            "summary": "Unable to generate structured feedback.",
-            "strengths": [],
-            "gaps": [
-                "The final feedback response could not be parsed."
-            ],
-            "next": [
-                "Review the interview responses manually."
-            ],
-        }
+def validate_feedback(
+    feedback: dict,
+) -> dict:
 
     # ------------------------------------------------------
-    # Ensure required fields exist
+    # SUMMARY
     # ------------------------------------------------------
 
-    feedback.setdefault(
+    summary = feedback.get(
         "summary",
         "",
     )
 
-    feedback.setdefault(
+
+    if not isinstance(
+        summary,
+        str,
+    ):
+
+        summary = str(
+            summary
+        )
+
+
+    feedback[
+        "summary"
+    ] = summary.strip()
+
+
+    # ------------------------------------------------------
+    # STRENGTHS
+    # ------------------------------------------------------
+
+    strengths = feedback.get(
         "strengths",
         [],
     )
 
-    feedback.setdefault(
+
+    if not isinstance(
+        strengths,
+        list,
+    ):
+
+        strengths = [
+            str(strengths)
+        ]
+
+
+    feedback[
+        "strengths"
+    ] = [
+
+        str(item).strip()
+
+        for item in strengths
+
+        if str(item).strip()
+    ]
+
+
+    # ------------------------------------------------------
+    # GAPS
+    # ------------------------------------------------------
+
+    gaps = feedback.get(
         "gaps",
         [],
     )
 
-    feedback.setdefault(
+
+    if not isinstance(
+        gaps,
+        list,
+    ):
+
+        gaps = [
+            str(gaps)
+        ]
+
+
+    feedback[
+        "gaps"
+    ] = [
+
+        str(item).strip()
+
+        for item in gaps
+
+        if str(item).strip()
+    ]
+
+
+    # ------------------------------------------------------
+    # NEXT STEPS
+    # ------------------------------------------------------
+
+    next_steps = feedback.get(
         "next",
         [],
     )
 
-    # ------------------------------------------------------
-    # Ensure correct data types
-    # ------------------------------------------------------
 
     if not isinstance(
-        feedback["strengths"],
+        next_steps,
         list,
     ):
-        feedback["strengths"] = []
 
-    if not isinstance(
-        feedback["gaps"],
-        list,
-    ):
-        feedback["gaps"] = []
+        next_steps = [
+            str(next_steps)
+        ]
 
-    if not isinstance(
-        feedback["next"],
-        list,
-    ):
-        feedback["next"] = []
 
-    if not isinstance(
-        feedback["summary"],
-        str,
-    ):
-        feedback["summary"] = str(
-            feedback["summary"]
-        )
+    feedback[
+        "next"
+    ] = [
+
+        str(item).strip()
+
+        for item in next_steps
+
+        if str(item).strip()
+    ]
+
 
     return feedback
+
+
+# ==========================================================
+# GENERATE FEEDBACK
+# ==========================================================
+
+def generate_feedback(
+    history: list,
+) -> dict:
+
+    # ======================================================
+    # VALIDATE HISTORY
+    # ======================================================
+
+    if not history:
+
+        return {
+
+            "summary": (
+                "No interview responses were recorded."
+            ),
+
+            "strengths": [],
+
+            "gaps": [],
+
+            "next": [],
+        }
+
+
+    # ======================================================
+    # LOAD PROMPT
+    # ======================================================
+
+    prompt_template = (
+        load_feedback_prompt()
+    )
+
+
+    # ======================================================
+    # SERIALIZE HISTORY
+    # ======================================================
+
+    history_text = json.dumps(
+
+        history,
+
+        indent=2,
+
+        ensure_ascii=False,
+    )
+
+
+    # ======================================================
+    # CREATE PROMPT
+    # ======================================================
+
+    prompt = prompt_template.format(
+
+        interview_history=history_text,
+    )
+
+
+    # ======================================================
+    # CALL LLM
+    # ======================================================
+
+    response = llm.invoke(
+        prompt
+    )
+
+
+    text = response.content.strip()
+
+
+    # ======================================================
+    # CLEAN RESPONSE
+    # ======================================================
+
+    text = clean_json_response(
+        text
+    )
+
+
+    # ======================================================
+    # PARSE JSON
+    # ======================================================
+
+    try:
+
+        feedback = json.loads(
+            text
+        )
+
+    except json.JSONDecodeError as exc:
+
+        raise ValueError(
+            "LLM returned invalid JSON "
+            "from the feedback generator: "
+            f"{text}"
+        ) from exc
+
+
+    # ======================================================
+    # VALIDATE
+    # ======================================================
+
+    return validate_feedback(
+        feedback
+    )

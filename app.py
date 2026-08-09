@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import random
 
 from graph.graph import graph
 
@@ -14,6 +13,10 @@ from services.question_generator import generate_question
 from retriever.curriculum import get_day
 
 
+# ==========================================================
+# APP
+# ==========================================================
+
 app = FastAPI(
     title="AI Interview Agent",
     version="1.0.0",
@@ -25,8 +28,11 @@ app = FastAPI(
 # ==========================================================
 
 class InterviewRequest(BaseModel):
+
     sessionId: str
+
     candidate: dict | None = None
+
     message: str | None = None
 
 
@@ -36,422 +42,926 @@ class InterviewRequest(BaseModel):
 
 @app.get("/")
 def home():
+
     return {
         "message": "AI Interview Agent Running"
     }
 
 
 # ==========================================================
-# MAIN INTERVIEW ENDPOINT
-# POST /api/interview
+# NORMALIZE TECHNOLOGY STACK
+# ==========================================================
+
+def normalize_tech_stack(
+    tech_stack,
+) -> list[str]:
+
+    if not isinstance(
+        tech_stack,
+        list,
+    ):
+        return []
+
+    cleaned = []
+
+    seen = set()
+
+    for technology in tech_stack:
+
+        if technology is None:
+            continue
+
+        technology = str(
+            technology
+        ).strip()
+
+        if not technology:
+            continue
+
+        key = technology.lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        cleaned.append(
+            technology
+        )
+
+    return cleaned
+
+
+# ==========================================================
+# BUILD FINAL FEEDBACK
+# ==========================================================
+
+def build_feedback_response(
+    feedback: dict,
+):
+
+    return {
+        "summary": feedback.get(
+            "summary",
+            "",
+        ),
+
+        "strengths": feedback.get(
+            "strengths",
+            [],
+        ),
+
+        "gaps": feedback.get(
+            "gaps",
+            [],
+        ),
+
+        "next": feedback.get(
+            "next",
+            [],
+        ),
+    }
+
+
+# ==========================================================
+# GENERATE NEXT QUESTION
+# ==========================================================
+
+def generate_next_question(
+    state: dict,
+):
+
+    # ------------------------------------------------------
+    # FIND AVAILABLE TOPICS
+    # ------------------------------------------------------
+
+    remaining_days = [
+
+        day
+
+        for day in state.get(
+            "completed_days",
+            [],
+        )
+
+        if day not in state.get(
+            "asked_days",
+            [],
+        )
+    ]
+
+    # ------------------------------------------------------
+    # IF ALL TOPICS HAVE BEEN USED
+    # ------------------------------------------------------
+
+    if not remaining_days:
+
+        # We can reuse a curriculum topic.
+        #
+        # The question itself will still be different
+        # because previous questions are passed to the LLM.
+
+        completed_days = state.get(
+            "completed_days",
+            [],
+        )
+
+        if not completed_days:
+
+            return None
+
+        remaining_days = completed_days
+
+
+    # ------------------------------------------------------
+    # SELECT TOPIC
+    # ------------------------------------------------------
+
+    import random
+
+    day = random.choice(
+        remaining_days
+    )
+
+
+    # Only add the day once.
+
+    if day not in state.get(
+        "asked_days",
+        [],
+    ):
+
+        state[
+            "asked_days"
+        ].append(
+            day
+        )
+
+
+    # ------------------------------------------------------
+    # LOAD LESSON
+    # ------------------------------------------------------
+
+    lesson = get_day(
+        day
+    )
+
+    if lesson is None:
+
+        raise ValueError(
+            f"Curriculum day not found: {day}"
+        )
+
+
+    state[
+        "current_day"
+    ] = day
+
+    state[
+        "lesson"
+    ] = lesson
+
+
+    # ------------------------------------------------------
+    # PREVIOUS QUESTIONS
+    # ------------------------------------------------------
+
+    previous_questions = list(
+        state.get(
+            "asked_questions",
+            [],
+        )
+    )
+
+
+    # Also collect questions from history.
+
+    for item in state.get(
+        "history",
+        [],
+    ):
+
+        question = item.get(
+            "question",
+            "",
+        )
+
+        if (
+            question
+            and question not in previous_questions
+        ):
+
+            previous_questions.append(
+                question
+            )
+
+
+    # ------------------------------------------------------
+    # GENERATE QUESTION
+    # ------------------------------------------------------
+
+    question = generate_question(
+
+        candidate=state[
+            "candidate"
+        ],
+
+        lesson=lesson,
+
+        tech_stack=state.get(
+            "tech_stack",
+            [],
+        ),
+
+        previous_questions=previous_questions,
+    )
+
+
+    if not question:
+
+        raise ValueError(
+            "Question generator returned an empty question."
+        )
+
+
+    # ------------------------------------------------------
+    # SAVE QUESTION
+    # ------------------------------------------------------
+
+    state[
+        "question"
+    ] = question
+
+
+    if question not in state.get(
+        "asked_questions",
+        [],
+    ):
+
+        state[
+            "asked_questions"
+        ].append(
+            question
+        )
+
+
+    return question
+
+
+# ==========================================================
+# INTERVIEW ENDPOINT
 # ==========================================================
 
 @app.post("/api/interview")
-def interview(request: InterviewRequest):
+def interview(
+    request: InterviewRequest,
+):
 
     session_id = request.sessionId
 
+
     # ======================================================
-    # START INTERVIEW
+    # START NEW INTERVIEW
     # ======================================================
 
     if session_id not in sessions:
 
-        # Candidate is required for first request
         if request.candidate is None:
+
             raise HTTPException(
                 status_code=400,
-                detail="candidate is required when starting a new interview."
+
+                detail=(
+                    "Candidate information is required "
+                    "when starting a new interview."
+                ),
             )
 
+
+        candidate = request.candidate
+
+
+        member = candidate.get(
+            "member",
+            {},
+        )
+
+
+        candidate_id = member.get(
+            "id",
+            session_id,
+        )
+
+
+        # --------------------------------------------------
+        # TECHNOLOGY STACK
+        # --------------------------------------------------
+
+        tech_stack = normalize_tech_stack(
+            candidate.get(
+                "techStack",
+                [],
+            )
+        )
+
+
+        if not tech_stack:
+
+            raise HTTPException(
+                status_code=400,
+
+                detail=(
+                    "Technology stack is required. "
+                    "Please provide at least one technology."
+                ),
+            )
+
+
+        candidate[
+            "techStack"
+        ] = tech_stack
+
+
+        # ==================================================
+        # INITIAL STATE
+        # ==================================================
+
         state = {
+
             "session_id": session_id,
 
-            "candidate_id": request.candidate.get(
-                "member", {}
-            ).get(
-                "id",
-                session_id
-            ),
+            "candidate_id": candidate_id,
 
-            "candidate": request.candidate,
+            "candidate": candidate,
+
+            "tech_stack": tech_stack,
 
             "completed_days": [],
+
             "asked_days": [],
 
             "current_day": 0,
+
             "lesson": {},
 
             "question": "",
+
             "answer": "",
 
             "evaluation": {},
 
             "question_count": 0,
 
+            "asked_questions": [],
+
+            "followup_pending": False,
+
             "history": [],
 
             "interview_complete": False,
 
             "final_feedback": {},
-
-            "followup_pending": False,
         }
 
-        # ==================================================
-        # RUN LANGGRAPH
-        # ==================================================
-
-        state = graph.invoke(state)
 
         # ==================================================
-        # SAVE FIRST SELECTED TOPIC
+        # RUN INITIAL GRAPH
         # ==================================================
 
-        if state["current_day"] not in state["asked_days"]:
-            state["asked_days"].append(
-                state["current_day"]
+        try:
+
+            state = graph.invoke(
+                state
             )
 
-        sessions[session_id] = state
+        except Exception as exc:
 
-        # ==================================================
-        # FIRST RESPONSE
-        # ==================================================
+            raise HTTPException(
+                status_code=500,
+
+                detail=(
+                    "Failed to start interview: "
+                    f"{exc}"
+                ),
+            )
+
+
+        question = state.get(
+            "question",
+            "",
+        )
+
+
+        if not question:
+
+            raise HTTPException(
+                status_code=500,
+
+                detail=(
+                    "The interview graph "
+                    "did not generate a question."
+                ),
+            )
+
+
+        # --------------------------------------------------
+        # TRACK FIRST QUESTION
+        # --------------------------------------------------
+
+        if question not in state[
+            "asked_questions"
+        ]:
+
+            state[
+                "asked_questions"
+            ].append(
+                question
+            )
+
+
+        # --------------------------------------------------
+        # SAVE SESSION
+        # --------------------------------------------------
+
+        sessions[
+            session_id
+        ] = state
+
+
+        print(
+            "=========================================="
+        )
+
+        print(
+            "NEW INTERVIEW"
+        )
+
+        print(
+            "SESSION:",
+            session_id,
+        )
+
+        print(
+            "CANDIDATE:",
+            candidate_id,
+        )
+
+        print(
+            "TECH STACK:",
+            tech_stack,
+        )
+
+        print(
+            "FIRST QUESTION:",
+            question,
+        )
+
+        print(
+            "=========================================="
+        )
 
         return {
-            "reply": state["question"],
-            "done": False,
+          "reply": question,
+          "done": False,
+          "follow_up": False,
         }
 
 
     # ======================================================
-    # EXISTING SESSION
+    # LOAD EXISTING SESSION
     # ======================================================
 
-    state = sessions[session_id]
+    state = sessions[
+        session_id
+    ]
 
 
     # ======================================================
-    # INTERVIEW ALREADY COMPLETED
+    # CHECK COMPLETION
     # ======================================================
 
-    if state.get("interview_complete", False):
+    if state.get(
+        "interview_complete",
+        False,
+    ):
 
         return {
+
             "reply": "Interview completed.",
+
             "done": True,
-            "feedback": state.get(
-                "final_feedback",
-                {}
+
+            "feedback": build_feedback_response(
+                state.get(
+                    "final_feedback",
+                    {},
+                )
             ),
         }
 
 
     # ======================================================
-    # MESSAGE REQUIRED
+    # ANSWER REQUIRED
     # ======================================================
 
     if request.message is None:
 
         raise HTTPException(
             status_code=400,
-            detail="message is required for an existing interview session."
+
+            detail=(
+                "message is required "
+                "for an existing interview."
+            ),
+        )
+
+
+    answer = request.message.strip()
+
+
+    if not answer:
+
+        raise HTTPException(
+            status_code=400,
+
+            detail="Answer cannot be empty.",
         )
 
 
     # ======================================================
-    # SAVE CANDIDATE ANSWER
+    # SAVE ANSWER
     # ======================================================
 
-    state["answer"] = request.message
+    state[
+        "answer"
+    ] = answer
 
 
     # ======================================================
-    # FOLLOW-UP ANSWER
+    # EVALUATE ANSWER
     # ======================================================
 
-    if state["followup_pending"]:
+    try:
 
         evaluation = evaluate_answer(
+
             state["question"],
-            state["answer"],
+
+            answer,
         )
 
-        state["evaluation"] = evaluation
+    except Exception as exc:
 
+        raise HTTPException(
+            status_code=500,
 
-        # --------------------------------------------------
-        # SAVE FOLLOW-UP TO HISTORY
-        # --------------------------------------------------
-
-        state["history"].append(
-            {
-                "question": state["question"],
-                "answer": state["answer"],
-                "score": evaluation["score"],
-                "strengths": evaluation["strengths"],
-                "weaknesses": evaluation["weaknesses"],
-            }
+            detail=(
+                "Failed to evaluate answer: "
+                f"{exc}"
+            ),
         )
 
 
-        # --------------------------------------------------
-        # FOLLOW-UP COMPLETED
-        # --------------------------------------------------
-
-        state["followup_pending"] = False
-
-        state["question_count"] += 1
+    state[
+        "evaluation"
+    ] = evaluation
 
 
     # ======================================================
-    # MAIN QUESTION ANSWER
+    # SAVE HISTORY
     # ======================================================
 
-    else:
+    state[
+        "history"
+    ].append(
 
-        evaluation = evaluate_answer(
-            state["question"],
-            state["answer"],
-        )
+        {
 
-        state["evaluation"] = evaluation
+            "question": state[
+                "question"
+            ],
+
+            "answer": answer,
+
+            "score": evaluation.get(
+                "score",
+                0,
+            ),
+
+            "strengths": evaluation.get(
+                "strengths",
+                [],
+            ),
+
+            "weaknesses": evaluation.get(
+                "weaknesses",
+                [],
+            ),
+        }
+    )
 
 
-        # --------------------------------------------------
-        # SAVE MAIN QUESTION TO HISTORY
-        # --------------------------------------------------
+    # ======================================================
+    # FOLLOW-UP NEEDED?
+    # ======================================================
 
-        state["history"].append(
-            {
-                "question": state["question"],
-                "answer": state["answer"],
-                "score": evaluation["score"],
-                "strengths": evaluation["strengths"],
-                "weaknesses": evaluation["weaknesses"],
-            }
-        )
+    if evaluation.get(
+        "follow_up_needed",
+        False,
+    ):
 
-
-        # --------------------------------------------------
-        # GENERATE FOLLOW-UP
-        # --------------------------------------------------
-
-        if evaluation["follow_up_needed"]:
+        try:
 
             followup = generate_followup(
+
                 state["question"],
-                state["answer"],
+
+                answer,
+
                 evaluation,
             )
 
-            state["question"] = followup
+        except Exception as exc:
 
-            state["followup_pending"] = True
+            raise HTTPException(
+                status_code=500,
 
-            sessions[session_id] = state
+                detail=(
+                    "Failed to generate follow-up: "
+                    f"{exc}"
+                ),
+            )
 
-            return {
-                "reply": followup,
-                "done": False,
-            }
+
+        if not followup:
+
+            raise HTTPException(
+                status_code=500,
+
+                detail=(
+                    "Follow-up generator "
+                    "returned an empty question."
+                ),
+            )
 
 
-        # --------------------------------------------------
-        # MAIN QUESTION COMPLETED
-        # --------------------------------------------------
+        state[
+            "question"
+        ] = followup
 
-        state["question_count"] += 1
+
+        state[
+            "followup_pending"
+        ] = True
+
+
+        if followup not in state[
+            "asked_questions"
+        ]:
+
+            state[
+                "asked_questions"
+            ].append(
+                followup
+            )
+
+
+        sessions[
+            session_id
+        ] = state
+
+
+        print(
+            "=========================================="
+        )
+
+        print(
+            "FOLLOW-UP QUESTION"
+        )
+
+        print(
+            followup
+        )
+
+        print(
+            "=========================================="
+        )
+
+
+        return {
+          "reply": followup,
+          "done": False,
+         "follow_up": True,
+}
+
+    # ======================================================
+    # NORMAL QUESTION COMPLETED
+    # ======================================================
+
+    state[
+        "followup_pending"
+    ] = False
+
+
+    state[
+        "question_count"
+    ] += 1
 
 
     # ======================================================
-    # INTERVIEW COMPLETE?
+    # MAX QUESTIONS
     # ======================================================
-    print("====================================")
-    print("QUESTION COUNT:", state["question_count"])
-    print("ASKED DAYS:", state["asked_days"])
-    print("HISTORY LENGTH:", len(state["history"]))
-    print("FOLLOWUP PENDING:", state["followup_pending"])
-    print("====================================")  
+
     MAX_QUESTIONS = 8
 
-    if state["question_count"] >= MAX_QUESTIONS:
 
-        feedback = generate_feedback(
-            state["history"]
-        )
+    if state[
+        "question_count"
+    ] >= MAX_QUESTIONS:
 
-        state["interview_complete"] = True
+        try:
 
-        state["final_feedback"] = feedback
+            feedback = generate_feedback(
+                state["history"]
+            )
 
-        sessions[session_id] = state
+        except Exception as exc:
+
+            raise HTTPException(
+                status_code=500,
+
+                detail=(
+                    "Failed to generate final feedback: "
+                    f"{exc}"
+                ),
+            )
 
 
-        # --------------------------------------------------
-        # FINAL RESPONSE
-        # --------------------------------------------------
+        state[
+            "interview_complete"
+        ] = True
+
+
+        state[
+            "final_feedback"
+        ] = feedback
+
+
+        sessions[
+            session_id
+        ] = state
+
 
         return {
+
             "reply": "Interview completed.",
+
             "done": True,
-            "feedback": {
-                "summary": feedback.get(
-                    "summary",
-                    ""
-                ),
 
-                "strengths": feedback.get(
-                    "strengths",
-                    []
-                ),
-
-                "gaps": feedback.get(
-                    "gaps",
-                    feedback.get(
-                        "weaknesses",
-                        []
-                    )
-                ),
-
-                "next": feedback.get(
-                    "next",
-                    feedback.get(
-                        "recommendations",
-                        []
-                    )
-                ),
-            },
+            "feedback": build_feedback_response(
+                feedback
+            ),
         }
-
-
-    # ======================================================
-    # FIND NEXT TOPIC
-    # ======================================================
-
-    remaining = [
-        day
-        for day in state["completed_days"]
-        if day not in state["asked_days"]
-    ]
-
-
-    # ------------------------------------------------------
-    # REUSE TOPICS IF ALL HAVE BEEN ASKED
-    # ------------------------------------------------------
-
-    if not remaining:
-
-        remaining = state["completed_days"]
-
-
-    # ======================================================
-    # SAFETY CHECK
-    # ======================================================
-
-    if not remaining:
-
-        feedback = generate_feedback(
-            state["history"]
-        )
-
-        state["interview_complete"] = True
-
-        state["final_feedback"] = feedback
-
-        sessions[session_id] = state
-
-        return {
-            "reply": "Interview completed.",
-            "done": True,
-            "feedback": {
-                "summary": feedback.get(
-                    "summary",
-                    ""
-                ),
-
-                "strengths": feedback.get(
-                    "strengths",
-                    []
-                ),
-
-                "gaps": feedback.get(
-                    "gaps",
-                    feedback.get(
-                        "weaknesses",
-                        []
-                    )
-                ),
-
-                "next": feedback.get(
-                    "next",
-                    feedback.get(
-                        "recommendations",
-                        []
-                    )
-                ),
-            },
-        }
-
-
-    # ======================================================
-    # SELECT NEXT TOPIC
-    # ======================================================
-
-    next_day = random.choice(
-        remaining
-    )
-
-
-    # ------------------------------------------------------
-    # ADD TOPIC ONLY ONCE
-    # ------------------------------------------------------
-
-    if next_day not in state["asked_days"]:
-
-        state["asked_days"].append(
-            next_day
-        )
-
-
-    # ======================================================
-    # LOAD LESSON
-    # ======================================================
-
-    lesson = get_day(
-        next_day
-    )
-
-    state["current_day"] = next_day
-
-    state["lesson"] = lesson
 
 
     # ======================================================
     # GENERATE NEXT QUESTION
     # ======================================================
 
-    question = generate_question(
-        state["candidate"],
-        lesson,
-    )
+    try:
 
-    state["question"] = question
+        next_question = generate_next_question(
+            state
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+
+            detail=(
+                "Failed to generate next question: "
+                f"{exc}"
+            ),
+        )
+
+
+    if not next_question:
+
+        try:
+
+            feedback = generate_feedback(
+                state["history"]
+            )
+
+        except Exception as exc:
+
+            raise HTTPException(
+                status_code=500,
+
+                detail=(
+                    "Failed to generate final feedback: "
+                    f"{exc}"
+                ),
+            )
+
+
+        state[
+            "interview_complete"
+        ] = True
+
+
+        state[
+            "final_feedback"
+        ] = feedback
+
+
+        sessions[
+            session_id
+        ] = state
+
+
+        return {
+
+            "reply": "Interview completed.",
+
+            "done": True,
+
+            "feedback": build_feedback_response(
+                feedback
+            ),
+        }
 
 
     # ======================================================
     # SAVE SESSION
     # ======================================================
 
-    sessions[session_id] = state
+    sessions[
+        session_id
+    ] = state
 
 
     # ======================================================
-    # RETURN NEXT QUESTION
+    # DEBUG
     # ======================================================
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        "NEXT QUESTION"
+    )
+
+    print(
+        "SESSION:",
+        session_id,
+    )
+
+    print(
+        "QUESTION COUNT:",
+        state["question_count"],
+    )
+
+    print(
+        "TECH STACK:",
+        state.get(
+            "tech_stack",
+            [],
+        ),
+    )
+
+    print(
+        "CURRENT DAY:",
+        state.get(
+            "current_day",
+            0,
+        ),
+    )
+
+    print(
+        "PREVIOUS QUESTIONS:",
+        len(
+            state.get(
+                "asked_questions",
+                [],
+            )
+        ),
+    )
+
+    print(
+        "QUESTION:",
+        next_question,
+    )
+
+    print(
+        "=========================================="
+    )
+
 
     return {
-        "reply": question,
+       "reply": next_question,
         "done": False,
+        "follow_up": False,
     }

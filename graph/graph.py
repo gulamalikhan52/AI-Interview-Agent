@@ -17,7 +17,9 @@ from graph.router import evaluation_router
 # CREATE GRAPH
 # ==========================================================
 
-builder = StateGraph(InterviewState)
+builder = StateGraph(
+    InterviewState
+)
 
 
 # ==========================================================
@@ -60,7 +62,7 @@ builder.set_entry_point(
 
 
 # ==========================================================
-# NORMAL FLOW
+# INITIAL INTERVIEW FLOW
 # ==========================================================
 
 builder.add_edge(
@@ -75,16 +77,25 @@ builder.add_edge(
 
 
 # ==========================================================
-# EVALUATION ROUTING
+# QUESTION GENERATION → END
 # ==========================================================
 
-builder.add_conditional_edges(
+# The API handles the next request after the candidate
+# submits the answer.
+
+builder.add_edge(
+    "generate_question",
+    END,
+)
+
+
+# ==========================================================
+# EVALUATION
+# ==========================================================
+
+builder.add_edge(
     "evaluate",
-    evaluation_router,
-    {
-        "follow_up": "follow_up",
-        "next": END,
-    },
+    END,
 )
 
 
